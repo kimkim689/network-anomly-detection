@@ -1,0 +1,8 @@
+.venv/
+/system_main/model/*.joblib
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
