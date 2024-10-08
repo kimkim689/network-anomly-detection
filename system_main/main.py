@@ -31,32 +31,39 @@ def list_network_interfaces():
         print(f"- {iface}: IP {ip}")
     
     print(f"\nCurrent default interface: {get_working_if()}")
-def generate_report(anomalies, total_packets):
+def generate_report(anomalies, total_packets, probabilities, args, features_df, model, selected_features):
     anomaly_percentage = (len(anomalies) / total_packets) * 100 if total_packets > 0 else 0
-    report = f"""
-    Analysis Report:
-    ----------------
-    Total packets analyzed: {total_packets}
-    Anomalies detected: {len(anomalies)}
-    Percentage of anomalies: {anomaly_percentage:.2f}%
+    
+    report = f"""Analysis Report:
+----------------
+Total packets analyzed: {total_packets}
+Anomalies detected: {len(anomalies)}
+Percentage of anomalies: {anomaly_percentage:.2f}%
 
-    Recommendation:
-    """
+Recommendation:
+"""
     if anomaly_percentage < 1:
         report += "Low level of anomalies detected. Continue monitoring."
     elif 1 <= anomaly_percentage < 5:
         report += "Moderate level of anomalies detected. Investigate the anomalous packets."
     else:
         report += "High level of anomalies detected. Urgent investigation required."
-    
-    return report
 
-def detect_anomalies_pcap(pcap_file, model, encoder, scaler, selected_features, model_type):
+    report += "\n\nTop 10 packets with highest anomaly scores:"
+    top_10_indices = np.argsort(probabilities)[-10:][::-1]
+    for i, idx in enumerate(top_10_indices, 1):
+        report += f"\nRank {i}: Packet {idx + 1}, Score: {probabilities[idx]:.4f}"
+
+
+
+    return report
+def detect_anomalies_pcap(pcap_file, model, encoder, scaler, selected_features, model_type, args):
     print(f"Analyzing PCAP file: {pcap_file}")
     features_df = extract_features_from_pcap(pcap_file)
     features_df = preprocess_features(features_df)
     
-    print(f"Features in PCAP data: {features_df.columns.tolist()}")
+    if args.detail:
+        print(f"Features in PCAP data: {features_df.columns.tolist()}")
     
     if model_type == 'xgboost':
         # For XGBoost, use the first 20 features (as that's what the model expects)
@@ -64,14 +71,16 @@ def detect_anomalies_pcap(pcap_file, model, encoder, scaler, selected_features, 
     elif selected_features is None:
         selected_features = features_df.columns.tolist()
     
-    print(f"Selected features: {selected_features}")
+    if args.detail:
+        print(f"Selected features: {selected_features}")
 
     # Add missing features with default values for Random Forest
     if model_type == 'rf':
         missing_features = [f for f in selected_features if f not in features_df.columns]
         for feature in missing_features:
             features_df[feature] = 0  # or another appropriate default value
-        print(f"Added missing features with default values: {missing_features}")
+        if args.detail:
+            print(f"Added missing features with default values: {missing_features}")
 
     # Use only selected features
     features_df = features_df[selected_features]
@@ -79,8 +88,9 @@ def detect_anomalies_pcap(pcap_file, model, encoder, scaler, selected_features, 
     categorical_cols = features_df.select_dtypes(include=['object', 'category']).columns
     numerical_cols = features_df.select_dtypes(include=['int64', 'float64']).columns
     
-    print(f"Categorical columns: {categorical_cols.tolist()}")
-    print(f"Numerical columns: {numerical_cols.tolist()}")
+    if args.detail:
+        print(f"Categorical columns: {categorical_cols.tolist()}")
+        print(f"Numerical columns: {numerical_cols.tolist()}")
 
     # Handle categorical columns
     for col in categorical_cols:
@@ -93,19 +103,17 @@ def detect_anomalies_pcap(pcap_file, model, encoder, scaler, selected_features, 
     if model_type == 'xgboost' and scaler is not None:
         # Scale all features for XGBoost
         features_df = pd.DataFrame(scaler.transform(features_df), columns=features_df.columns)
-        print(f"Scaled features: {features_df.columns.tolist()}")
+        if args.detail:
+            print(f"Scaled features: {features_df.columns.tolist()}")
 
     features_array = features_df.values
 
-    print(f"Shape of features array: {features_array.shape}")
+    if args.detail:
+        print(f"Shape of features array: {features_array.shape}")
 
     # Get probability scores from the model
     probabilities = model.predict_proba(features_array)
     
-    print("Anomaly probability scores:")
-    for i, prob in enumerate(probabilities[:, 1]):
-        print(f"Packet {i+1}: {prob:.4f}")
-
 
     # Use IsolationForest as a secondary detection method
     iso_forest = IsolationForest(contamination=0.1, random_state=42)
@@ -118,14 +126,13 @@ def detect_anomalies_pcap(pcap_file, model, encoder, scaler, selected_features, 
 
     anomalies = features_df[combined_anomalies]
 
-    report = generate_report(anomalies, len(features_df))
-    print("\nAnalysis Report:")
-    print(report)
+    report = generate_report(anomalies, len(features_df), probabilities[:, 1], args, features_df, model, selected_features)
+    print(report)  
 
     if len(anomalies) == 0:
-        print("No anomalies detected. Consider reviewing the model and detection method.")
+        print("\nNo anomalies detected. Consider reviewing the model and detection method.")
     else:
-        print(f"Detected {len(anomalies)} anomalies. Review the detailed packet information above.")
+        print(f"\nDetected {len(anomalies)} anomalies. Review the detailed packet information above.")
 
     return anomalies, probabilities[:, 1]
 
@@ -167,7 +174,7 @@ def detect_anomalies_live(interface, model, encoder, scaler, selected_features, 
                         anomalies.append(features)
 
             if total_packets % 100 == 0:  # Generate report every 100 packets
-                report = generate_report(anomalies, total_packets)
+                report = generate_report(anomalies, total_packets, probabilities, args, features_df, model, selected_features)
                 print(report)
 
         except Exception as e:
@@ -185,16 +192,16 @@ def detect_anomalies_live(interface, model, encoder, scaler, selected_features, 
         print(f"Total packets analyzed: {total_packets}")
         print(f"Total anomalies detected: {len(anomalies)}")
         print(f"Total errors encountered: {error_count}")
-        
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="UNSW_NB15 Network Anomaly Detection System")
+    parser = argparse.ArgumentParser(description="Network Anomaly Detection System")
     parser.add_argument("--mode", choices=["train", "detect_pcap", "detect_live", "list_interfaces"], required=True)
     parser.add_argument("--model", choices=["rf", "xgboost"], default="rf", help="Choose model: Random Forest (rf), XGBoost (xgboost)")
     parser.add_argument("--train_file", default="UNSW_NB15_training-set.csv", help="Training data CSV file")
     parser.add_argument("--test_file", default="UNSW_NB15_testing-set.csv", help="Testing data CSV file")
     parser.add_argument("--input", help="Input PCAP file for detection")
     parser.add_argument("--interface", help="Network interface for live detection")
-
+    parser.add_argument("--detail", action="store_true", help="Generate detailed report")
     args = parser.parse_args()
 
     if args.mode == "list_interfaces":
@@ -246,20 +253,11 @@ if __name__ == "__main__":
                 print(f"Model type: {type(model)}")
                 print(f"Selected features: {selected_features}")
                 
-                anomalies, probabilities = detect_anomalies_pcap(args.input, model, encoder, scaler, selected_features, args.model)
-                
-                if len(anomalies) > 0:
-                    print("\nDetailed information about detected anomalies:")
-                    print(anomalies)
-                
-                print("\nTop 10 packets with highest anomaly scores:")
-                top_10_indices = np.argsort(probabilities)[-10:][::-1]
-                for i, idx in enumerate(top_10_indices, 1):
-                    print(f"Rank {i}: Packet {idx + 1}, Score: {probabilities[idx]:.4f}")
-            
+                anomalies, probabilities = detect_anomalies_pcap(args.input, model, encoder, scaler, selected_features, args.model, args)
+    
             elif args.mode == "detect_live":
                 if not args.interface:
                     print("Please provide a network interface for live detection.")
                     print("You can use the --mode list_interfaces option to see available interfaces.")
                     exit(1)
-                detect_anomalies_live(args.interface, model, encoder, scaler, selected_features, args.model)
+                detect_anomalies_live(args.interface, model, encoder, scaler, selected_features, args.model, args)
