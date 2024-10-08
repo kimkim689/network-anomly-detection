@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from scapy.all import rdpcap, sniff
 from scapy.layers.inet import IP, TCP, UDP 
+from scapy.all import get_if_list, conf, get_working_if
 import pyfiglet
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import IsolationForest
@@ -20,6 +21,16 @@ def show_system_name(mode, input_file=None, interface=None):
     print(f"Input: {input_file or interface or 'N/A'}")
     print("-" * 50)
 
+def list_network_interfaces():
+    print("Available network interfaces:")
+    for iface in get_if_list():
+        try:
+            ip = conf.ifaces[iface].ip
+        except AttributeError:
+            ip = "N/A"
+        print(f"- {iface}: IP {ip}")
+    
+    print(f"\nCurrent default interface: {get_working_if()}")
 def generate_report(anomalies, total_packets):
     anomaly_percentage = (len(anomalies) / total_packets) * 100 if total_packets > 0 else 0
     report = f"""
@@ -123,53 +134,62 @@ def detect_anomalies_live(interface, model, encoder, scaler, selected_features, 
     
     anomalies = []
     total_packets = 0
+    error_count = 0
 
     def packet_callback(packet):
-        nonlocal total_packets, anomalies
+        nonlocal total_packets, anomalies, error_count
         total_packets += 1
         
-        if IP in packet:
-            features = extract_features_from_packet(packet)
-            if features:
-                features_df = pd.DataFrame([features])
-                features_df = preprocess_features(features_df)
-                
-                # Ensure all selected features are present
-                for feature in selected_features:
-                    if feature not in features_df.columns:
-                        features_df[feature] = 0
-                
-                features_df = features_df[selected_features]
-                
-                if model_type == 'xgboost' and scaler is not None:
-                    features_df = pd.DataFrame(scaler.transform(features_df), columns=features_df.columns)
-                
-                prediction = model.predict(features_df)[0]
-                probability = model.predict_proba(features_df)[0][1]
-                
-                if prediction == 1:
-                    print(f"Anomaly detected: {packet.summary()}")
-                    print(f"Anomaly probability: {probability:.4f}")
-                    print(f"Features: {features}")
-                    anomalies.append(features)
+        try:
+            if IP in packet:
+                features = extract_features_from_packet(packet)
+                if features:
+                    features_df = pd.DataFrame([features])
+                    features_df = preprocess_features(features_df)
+                    
+                    # Ensure all selected features are present
+                    for feature in selected_features:
+                        if feature not in features_df.columns:
+                            features_df[feature] = 0 if feature not in ['state', 'proto', 'attack_cat'] else 'UNK'
+                    
+                    features_df = features_df[selected_features]
+                    
+                    if model_type == 'xgboost' and scaler is not None:
+                        # Only scale numerical features
+                        numerical_features = features_df.select_dtypes(include=['float64', 'int64']).columns
+                        features_df[numerical_features] = scaler.transform(features_df[numerical_features])
+                    
+                    prediction = model.predict(features_df)[0]
+                    
+                    if prediction == 1:
+                        print(f"Anomaly detected: {packet.summary()}")
+                        print(f"Features: {features}")
+                        anomalies.append(features)
 
-        if total_packets % 100 == 0:  # Generate report every 100 packets
-            report = generate_report(anomalies, total_packets)
-            print(report)
+            if total_packets % 100 == 0:  # Generate report every 100 packets
+                report = generate_report(anomalies, total_packets)
+                print(report)
+
+        except Exception as e:
+            error_count += 1
+            print(f"Error processing packet: {e}")
+            if error_count > 10:
+                print("Too many errors. Stopping packet capture.")
+                return True  # Stop sniffing
 
     try:
-        sniff(iface=interface, prn=packet_callback, store=0)
+        sniff(iface=interface, prn=packet_callback, store=0, stop_filter=lambda _: error_count > 10)
     except KeyboardInterrupt:
         print("\nStopped packet capture.")
     finally:
         print(f"Total packets analyzed: {total_packets}")
         print(f"Total anomalies detected: {len(anomalies)}")
-
-
+        print(f"Total errors encountered: {error_count}")
+        
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="UNSW_NB15 Network Anomaly Detection System")
-    parser.add_argument("--mode", choices=["train", "detect_pcap", "detect_live"], required=True)
-    parser.add_argument("--model", choices=["rf", "xgboost", "cnn"], default="rf", help="Choose model: Random Forest (rf), XGBoost (xgboost), or CNN (cnn)")
+    parser.add_argument("--mode", choices=["train", "detect_pcap", "detect_live", "list_interfaces"], required=True)
+    parser.add_argument("--model", choices=["rf", "xgboost"], default="rf", help="Choose model: Random Forest (rf), XGBoost (xgboost)")
     parser.add_argument("--train_file", default="UNSW_NB15_training-set.csv", help="Training data CSV file")
     parser.add_argument("--test_file", default="UNSW_NB15_testing-set.csv", help="Testing data CSV file")
     parser.add_argument("--input", help="Input PCAP file for detection")
@@ -177,60 +197,69 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    show_system_name(args.mode, args.input, args.interface)
+    if args.mode == "list_interfaces":
+        list_network_interfaces()
+    else:
+        show_system_name(args.mode, args.input, args.interface)
 
-    if args.mode == "train":
-        X_train, X_test, y_train, y_test, label_encoders, selected_features = load_and_preprocess_data(args.train_file, args.test_file)
-        if args.model == "rf":
-            # Ensure selected_features is a list
-            if isinstance(selected_features, pd.Index):
-                selected_features = selected_features.tolist()
-            elif selected_features is None:
-                selected_features = [f"feature_{i}" for i in range(X_train.shape[1])]
+        if args.mode == "train":
+            X_train, X_test, y_train, y_test, label_encoders, selected_features = load_and_preprocess_data(args.train_file, args.test_file)
+            if args.model == "rf":
+                # Ensure selected_features is a list
+                if isinstance(selected_features, pd.Index):
+                    selected_features = selected_features.tolist()
+                elif selected_features is None:
+                    selected_features = [f"feature_{i}" for i in range(X_train.shape[1])]
 
-            model = train_rf_model(X_train, y_train, X_test, y_test, selected_features)
-            encoder, scaler = label_encoders, None
-        elif args.model == "xgboost":
-            model, encoder, scaler = train_xgboost_model(X_train, y_train, X_test, y_test)
-    
-    elif args.mode in ["detect_pcap", "detect_live"]:
-        if args.model == "rf":
-            model, feature_names = load_rf_model()
-            _, _, _, _, encoder, selected_features = load_and_preprocess_data(args.train_file, args.test_file)
-            scaler = None
-        elif args.model == "xgboost":
-            model, encoder, scaler = load_xgboost_model()
-            _, _, _, _, _, selected_features = load_and_preprocess_data(args.train_file, args.test_file)
-            feature_names = None
-
-    if args.mode == "detect_pcap":
-        if args.model == "rf":
-            model, selected_features = load_rf_model()
-            encoder, scaler = None, None
-        elif args.model == "xgboost":
-            model, encoder, scaler = load_xgboost_model()
-            if hasattr(model, 'feature_names_in_'):
-                selected_features = model.feature_names_in_.tolist()
-            else:
-                selected_features = None
-                print("Warning: No selected features found for XGBoost model. Using all available features.")
-            if scaler is not None:
-                if hasattr(scaler, 'feature_names_in_'):
-                    print(f"Scaler features: {scaler.feature_names_in_.tolist()}")
-                else:
-                    print("Scaler does not have feature_names_in_ attribute. Assuming it was fitted on the first 20 features.")
-    
-
-        print(f"Model type: {type(model)}")
-        print(f"Selected features: {selected_features}")
+                model = train_rf_model(X_train, y_train, X_test, y_test, selected_features)
+                encoder, scaler = label_encoders, None
+            elif args.model == "xgboost":
+                model, encoder, scaler = train_xgboost_model(X_train, y_train, X_test, y_test)
         
-        anomalies, probabilities = detect_anomalies_pcap(args.input, model, encoder, scaler, selected_features, args.model)
-        
-        if len(anomalies) > 0:
-            print("\nDetailed information about detected anomalies:")
-            print(anomalies)
-        
-        print("\nTop 10 packets with highest anomaly scores:")
-        top_10_indices = np.argsort(probabilities)[-10:][::-1]
-        for i, idx in enumerate(top_10_indices, 1):
-            print(f"Rank {i}: Packet {idx + 1}, Score: {probabilities[idx]:.4f}")
+        elif args.mode in ["detect_pcap", "detect_live"]:
+            if args.model == "rf":
+                model, feature_names = load_rf_model()
+                _, _, _, _, encoder, selected_features = load_and_preprocess_data(args.train_file, args.test_file)
+                scaler = None
+            elif args.model == "xgboost":
+                model, encoder, scaler = load_xgboost_model()
+                _, _, _, _, _, selected_features = load_and_preprocess_data(args.train_file, args.test_file)
+                feature_names = None
+
+            if args.mode == "detect_pcap":
+                if args.model == "rf":
+                    model, selected_features = load_rf_model()
+                    encoder, scaler = None, None
+                elif args.model == "xgboost":
+                    model, encoder, scaler = load_xgboost_model()
+                    if hasattr(model, 'feature_names_in_'):
+                        selected_features = model.feature_names_in_.tolist()
+                    else:
+                        selected_features = None
+                        print("Warning: No selected features found for XGBoost model. Using all available features.")
+                    if scaler is not None:
+                        if hasattr(scaler, 'feature_names_in_'):
+                            print(f"Scaler features: {scaler.feature_names_in_.tolist()}")
+                        else:
+                            print("Scaler does not have feature_names_in_ attribute. Assuming it was fitted on the first 20 features.")
+            
+                print(f"Model type: {type(model)}")
+                print(f"Selected features: {selected_features}")
+                
+                anomalies, probabilities = detect_anomalies_pcap(args.input, model, encoder, scaler, selected_features, args.model)
+                
+                if len(anomalies) > 0:
+                    print("\nDetailed information about detected anomalies:")
+                    print(anomalies)
+                
+                print("\nTop 10 packets with highest anomaly scores:")
+                top_10_indices = np.argsort(probabilities)[-10:][::-1]
+                for i, idx in enumerate(top_10_indices, 1):
+                    print(f"Rank {i}: Packet {idx + 1}, Score: {probabilities[idx]:.4f}")
+            
+            elif args.mode == "detect_live":
+                if not args.interface:
+                    print("Please provide a network interface for live detection.")
+                    print("You can use the --mode list_interfaces option to see available interfaces.")
+                    exit(1)
+                detect_anomalies_live(args.interface, model, encoder, scaler, selected_features, args.model)
