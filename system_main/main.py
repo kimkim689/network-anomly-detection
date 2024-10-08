@@ -3,6 +3,7 @@ import os
 import pandas as pd
 import numpy as np
 from scapy.all import rdpcap, sniff
+from scapy.layers.inet import IP, TCP, UDP 
 import pyfiglet
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import IsolationForest
@@ -117,63 +118,52 @@ def detect_anomalies_pcap(pcap_file, model, encoder, scaler, selected_features, 
 
     return anomalies, probabilities[:, 1]
 
-def detect_anomalies_live(interface, model, encoder, scaler, selected_features, model_type, feature_names=None):
+def detect_anomalies_live(interface, model, encoder, scaler, selected_features, model_type):
     print(f"Monitoring live traffic on interface: {interface}")
     
     anomalies = []
     total_packets = 0
-    buffer = []
 
     def packet_callback(packet):
-        nonlocal total_packets, anomalies, buffer
+        nonlocal total_packets, anomalies
         total_packets += 1
-        features = extract_features_from_packet(packet)
-        if features:
-            features_df = pd.DataFrame([features])
-            features_df = preprocess_features(features_df)
-            
-            if model_type == 'xgboost':
-                # Apply encoding and scaling for XGBoost
-                categorical_cols = ['proto', 'service', 'state', 'attack_cat']
-                features_df[categorical_cols] = encoder.transform(features_df[categorical_cols])
-                features_df = scaler.transform(features_df)
-            elif model_type == 'cnn':
-                # Preprocess for CNN
-                features_df = scaler.transform(features_df)
-                buffer.append(features_df[0])
-                if len(buffer) < 10:  # Assuming time_steps=10 for CNN
-                    return
-                features_df = np.array([buffer[-10:]])
-            else:  # Random Forest
-                for col in encoder:
-                    if col in features_df.columns:
-                        features_df[col] = encoder[col].transform(features_df[col].astype(str))
-            
-            # Ensure all selected features are present and in the correct order
-            for feature in feature_names:
-                if feature not in features_df.columns:
-                    features_df[feature] = 0  # or another appropriate default value
-            features_df = features_df[feature_names]
-            # Ensure all selected features are present
-            if model_type != 'cnn':
+        
+        if IP in packet:
+            features = extract_features_from_packet(packet)
+            if features:
+                features_df = pd.DataFrame([features])
+                features_df = preprocess_features(features_df)
+                
+                # Ensure all selected features are present
                 for feature in selected_features:
                     if feature not in features_df.columns:
-                        features_df[feature] = 0  # or another appropriate default value
+                        features_df[feature] = 0
+                
                 features_df = features_df[selected_features]
-            
-            prediction = model.predict(features_df)[0]
-            if model_type == 'cnn':
-                prediction = (prediction > 0.5).astype(int)
-            if prediction == 1:
-                print(f"Anomaly detected: {packet.summary()}")
-                print(f"Features: {features}")
-                anomalies.append(features)
+                
+                if model_type == 'xgboost' and scaler is not None:
+                    features_df = pd.DataFrame(scaler.transform(features_df), columns=features_df.columns)
+                
+                prediction = model.predict(features_df)[0]
+                probability = model.predict_proba(features_df)[0][1]
+                
+                if prediction == 1:
+                    print(f"Anomaly detected: {packet.summary()}")
+                    print(f"Anomaly probability: {probability:.4f}")
+                    print(f"Features: {features}")
+                    anomalies.append(features)
 
         if total_packets % 100 == 0:  # Generate report every 100 packets
             report = generate_report(anomalies, total_packets)
             print(report)
 
-    sniff(iface=interface, prn=packet_callback, store=0)
+    try:
+        sniff(iface=interface, prn=packet_callback, store=0)
+    except KeyboardInterrupt:
+        print("\nStopped packet capture.")
+    finally:
+        print(f"Total packets analyzed: {total_packets}")
+        print(f"Total anomalies detected: {len(anomalies)}")
 
 
 if __name__ == "__main__":
@@ -202,9 +192,6 @@ if __name__ == "__main__":
             encoder, scaler = label_encoders, None
         elif args.model == "xgboost":
             model, encoder, scaler = train_xgboost_model(X_train, y_train, X_test, y_test)
-        else:  # CNN
-            model, scaler = train_cnn_model(X_train, y_train, X_test, y_test)
-            encoder = None
     
     elif args.mode in ["detect_pcap", "detect_live"]:
         if args.model == "rf":
@@ -215,11 +202,6 @@ if __name__ == "__main__":
             model, encoder, scaler = load_xgboost_model()
             _, _, _, _, _, selected_features = load_and_preprocess_data(args.train_file, args.test_file)
             feature_names = None
-        else:  # CNN
-            model, scaler = load_cnn_model()
-            encoder, feature_names = None, None
-            _, _, _, _, _, selected_features = load_and_preprocess_data(args.train_file, args.test_file)
-        
 
     if args.mode == "detect_pcap":
         if args.model == "rf":
@@ -238,10 +220,7 @@ if __name__ == "__main__":
                 else:
                     print("Scaler does not have feature_names_in_ attribute. Assuming it was fitted on the first 20 features.")
     
-        else:  # CNN
-            model, scaler = load_cnn_model()
-            encoder, selected_features = None, None
-        
+
         print(f"Model type: {type(model)}")
         print(f"Selected features: {selected_features}")
         
