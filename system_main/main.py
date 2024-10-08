@@ -54,7 +54,23 @@ Recommendation:
     for i, idx in enumerate(top_10_indices, 1):
         report += f"\nRank {i}: Packet {idx + 1}, Score: {probabilities[idx]:.4f}"
 
+    if args.detail and features_df is not None:
+        report += f"""
 
+Detailed Report:
+----------------
+Model type: {type(model).__name__}
+Selected features: {selected_features}
+Name of analyzed PCAP: {args.input}
+Features in PCAP: {features_df.columns.tolist()}
+Categorical columns: {features_df.select_dtypes(include=['category', 'object']).columns.tolist()}
+Numerical columns: {features_df.select_dtypes(include=[np.number]).columns.tolist()}
+Shape of feature array: {features_df.shape}
+
+Anomaly probability scores:
+"""
+        for i, prob in enumerate(probabilities):
+            report += f"\nPacket {i+1}: {prob:.4f}"
 
     return report
 def detect_anomalies_pcap(pcap_file, model, encoder, scaler, selected_features, model_type, args):
