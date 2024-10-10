@@ -134,7 +134,7 @@ def detect_anomalies_pcap(pcap_file, model, encoder, scaler, selected_features, 
     # Use IsolationForest as a secondary detection method
     iso_forest = IsolationForest(contamination=0.1, random_state=42)
     iso_forest_predictions = iso_forest.fit_predict(features_array)
-    iso_forest_anomalies = iso_forest_predictions == -1
+    iso_forest_anomalies = iso_forest_predictions == 1
 
     # Combine predictions
     anomaly_threshold = np.percentile(probabilities[:, 1], 90)  # Flag top 10% as anomalies
