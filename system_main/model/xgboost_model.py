@@ -1,98 +1,69 @@
 from xgboost import XGBClassifier
-from sklearn.model_selection import RandomizedSearchCV
-from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix, classification_report
-from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.model_selection import RandomizedSearchCV, cross_val_score
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import joblib
 import os
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-def train_xgboost_model(X_train, y_train, X_test, y_test):
-    # Convert to DataFrame if not already
-    if not isinstance(X_train, pd.DataFrame):
-        X_train = pd.DataFrame(X_train)
-        X_test = pd.DataFrame(X_test)
-
-    # Identify categorical columns (assuming categorical columns are object or category dtype)
-    categorical_cols = X_train.select_dtypes(include=['object', 'category']).columns.tolist()
-
-    # Encode categorical variables
-    encoder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-    X_train[categorical_cols] = encoder.fit_transform(X_train[categorical_cols])
-    X_test[categorical_cols] = encoder.transform(X_test[categorical_cols])
-
-    # Standardize numerical features
-    scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_test = scaler.transform(X_test)
-
-    # Initial model training
-    model = XGBClassifier()
-    model.fit(X_train, y_train)
-
-    # Hyperparameter tuning
+def train_xgboost_model(X_train, y_train, X_test, y_test, feature_names=None):
+    # Define the parameter grid for RandomizedSearchCV
     param_dist = {
-        'n_estimators': [50, 100, 200],
-        'learning_rate': [0.01, 0.1, 0.2],
-        'max_depth': [3, 5, 7],
-        'subsample': [0.7, 0.8, 1.0],
-        'colsample_bytree': [0.7, 0.8, 1.0],
+        'n_estimators': [100, 200, 300],
+        'max_depth': [3, 5, 7, 9],
+        'learning_rate': [0.01, 0.1, 0.3],
+        'subsample': [0.6, 0.8, 1.0],
+        'colsample_bytree': [0.6, 0.8, 1.0],
         'gamma': [0, 0.1, 0.2],
-        'reg_alpha': [0, 0.1, 1],
-        'reg_lambda': [1, 1.5, 2]
+        'min_child_weight': [1, 3, 5]
     }
-
-    random_search = RandomizedSearchCV(
-        model,
-        param_distributions=param_dist,
-        n_iter=20,
-        cv=5,
-        scoring='accuracy',
-        verbose=1,
-        n_jobs=-1
-    )
+    
+    xgb = XGBClassifier(random_state=42, n_jobs=-1)
+    
+    # Perform cross-validation
+    cv_scores = cross_val_score(xgb, X_train, y_train, cv=5, scoring='f1_macro')
+    print(f"Cross-validation scores: {cv_scores}")
+    print(f"Mean CV score: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
+    
+    random_search = RandomizedSearchCV(xgb, param_distributions=param_dist, n_iter=20, cv=5, random_state=42, n_jobs=-1, scoring='f1_macro')
     random_search.fit(X_train, y_train)
+    
+    model = random_search.best_estimator_
 
-    print(f"Best Parameters: {random_search.best_params_}")
-    print(f"Best Score: {random_search.best_score_}")
+    # Make predictions
+    y_pred = model.predict(X_test)
 
-    # Train optimized model
-    optimized_model = XGBClassifier(**random_search.best_params_)
-    optimized_model.fit(X_train, y_train)
+    # Calculate accuracy
+    accuracy = accuracy_score(y_test, y_pred)
+    print(f"Model accuracy: {accuracy}")
 
-    # Evaluate the model
-    y_pred = optimized_model.predict(X_test)
-    y_pred_prob = optimized_model.predict_proba(X_test)[:, 1]
+    # Generate and print classification report
+    report = classification_report(y_test, y_pred)
+    print("Classification Report:")
+    print(report)
 
-    print(f"Accuracy: {accuracy_score(y_test, y_pred)}")
-    print(f"ROC-AUC: {roc_auc_score(y_test, y_pred_prob)}")
+    # Generate and print confusion matrix
+    cm = confusion_matrix(y_test, y_pred)
     print("Confusion Matrix:")
-    print(confusion_matrix(y_test, y_pred))
-    print("\nClassification Report:")
-    print(classification_report(y_test, y_pred))
+    print(cm)
+
+    # Feature importance
+    if feature_names is not None:
+        importances = model.feature_importances_
+        xgb_importances = pd.Series(importances, index=feature_names).sort_values(ascending=False)
+        print("\nFeature Importances:")
+        print(xgb_importances)
 
     # Save the model
     model_dir = os.path.dirname(os.path.abspath(__file__))
-    joblib.dump(optimized_model, os.path.join(model_dir, 'xgboost_model.joblib'))
-    joblib.dump(encoder, os.path.join(model_dir, 'xgboost_encoder.joblib'))
-    joblib.dump(scaler, os.path.join(model_dir, 'xgboost_scaler.joblib'))
+    joblib.dump(model, os.path.join(model_dir, 'xgboost_model.joblib'))
 
-    return optimized_model, encoder, scaler
+    return model
 
 def load_xgboost_model():
     model_dir = os.path.dirname(os.path.abspath(__file__))
     model = joblib.load(os.path.join(model_dir, 'xgboost_model.joblib'))
-    try:
-        encoder = joblib.load(os.path.join(model_dir, 'xgboost_encoder.joblib'))
-        print(f"Loaded encoder. Fitted categories: {encoder.categories_ if hasattr(encoder, 'categories_') else 'Not available'}")
-    except:
-        print("No encoder found. Proceeding without encoding.")
-        encoder = None
-    try:
-        scaler = joblib.load(os.path.join(model_dir, 'xgboost_scaler.joblib'))
-        print(f"Loaded scaler. Scale: {scaler.scale_}")
-        print(f"Scaler mean: {scaler.mean_}")
-    except:
-        print("No scaler found. Proceeding without scaling.")
-        scaler = None
-    return model, encoder, scaler
+    return model
+
+def predict_with_probabilities(model, X):
+    return model.predict(X), model.predict_proba(X)
