@@ -14,7 +14,7 @@ from system_main.dataset.data_processing import load_preprocessor, preprocess_fo
 from system_main.feature_extraction import extract_features_from_packet, extract_features_from_pcap
 import logging
 
-DEFAULT_PERCENTILE = 90
+DEFAULT_PERCENTILE = 95
 def execute_notebook(notebook_path):
     with open(notebook_path) as f:
         nb = nbformat.read(f, as_version=4)
@@ -206,11 +206,13 @@ def detect_anomalies_live(interface, models, preprocessors, model_type, args):
     anomalies = []
     total_packets = 0
     error_count = 0
+    all_probabilities = []
 
-    iso_forest = IsolationForest(contamination=0.1, random_state=42)
+    def calculate_dynamic_threshold(probabilities, percentile=95):
+        return np.percentile(probabilities, percentile)
 
     def packet_callback(packet):
-        nonlocal total_packets, anomalies, error_count
+        nonlocal total_packets, anomalies, error_count, all_probabilities
         total_packets += 1
         
         try:
@@ -229,34 +231,39 @@ def detect_anomalies_live(interface, models, preprocessors, model_type, args):
                         
                         probability = combine_predictions(np.array([rf_probability]), np.array([xgb_probability]))[0]
                     else:
-                        features_df = preprocess_for_inference(features_df, preprocessors[model_type], model_type)
-                        probability = models[model_type].predict_proba(features_df)[0, 1]
+                        features_processed = preprocess_for_inference(features_df, preprocessors[model_type], model_type)
+                        probability = models[model_type].predict_proba(features_processed)[0, 1]
                     
-                    iso_forest_prediction = iso_forest.predict(features_df)
+                    all_probabilities.append(probability)
                     
-                    anomaly_threshold = 0.7
-                    is_anomaly = (probability > anomaly_threshold) or (iso_forest_prediction == -1)
+                    # Calculate dynamic threshold
+                    if len(all_probabilities) >= 100:  # Start using dynamic threshold after 100 packets
+                        threshold = calculate_dynamic_threshold(all_probabilities)
+                    else:
+                        threshold = 0.7  # Use a fixed threshold for the first 100 packets
+                    
+                    is_anomaly = probability > threshold
                     
                     if is_anomaly:
                         print(f"Anomaly detected: {packet.summary()}")
                         print(f"Anomaly Probability: {probability:.4f}")
                         anomalies.append(features)
 
+                    # Debugging output
+                    print(f"Processed packet {total_packets}:")
+                    print(f"  Features shape: {features_df.shape}")
+                    print(f"  Probability: {probability:.4f}")
+                    print(f"  Threshold: {threshold:.4f}")
+                    print(f"  Is anomaly: {is_anomaly}")
+
             if total_packets % 100 == 0:  # Generate report every 100 packets
-                if model_type == 'combine':
-                    probs = np.array([combine_predictions(
-                        models['rf'].predict_proba(preprocess_for_inference(pd.DataFrame([a]), preprocessors['rf'], 'rf'))[:, 1],
-                        models['xgboost'].predict_proba(preprocess_for_inference(pd.DataFrame([a]), preprocessors['xgboost'], 'xgboost'))[:, 1]
-                    ) for a in anomalies])
-                else:
-                    probs = np.array([models[model_type].predict_proba(preprocess_for_inference(pd.DataFrame([a]), preprocessors[model_type], model_type))[:, 1] for a in anomalies])
-                
-                report = generate_report(anomalies, total_packets, probs, args, pd.DataFrame(anomalies), model_type)
-                print(report)
+                generate_report(anomalies, total_packets, all_probabilities, args, model_type)
 
         except Exception as e:
             error_count += 1
-            print(f"Error processing packet: {e}")
+            print(f"Error processing packet {total_packets}: {str(e)}")
+            print(f"Packet summary: {packet.summary()}")
+            print(f"Extracted features: {features if 'features' in locals() else 'Not extracted'}")
             if error_count > 10:
                 print("Too many errors. Stopping packet capture.")
                 return True  # Stop sniffing
@@ -269,7 +276,7 @@ def detect_anomalies_live(interface, models, preprocessors, model_type, args):
         print(f"Total packets analyzed: {total_packets}")
         print(f"Total anomalies detected: {len(anomalies)}")
         print(f"Total errors encountered: {error_count}")
-
+        
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Network Anomaly Detection System")
     parser.add_argument("--mode", choices=["detect_pcap", "detect_live", "list_interfaces", "train"], required=True)

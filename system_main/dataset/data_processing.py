@@ -36,13 +36,13 @@ def preprocess_for_random_forest(df, preprocessor):
         if feature not in df.columns:
             df[feature] = 0
 
-    return df[selected_features]
+    return df[selected_features].values
 
 def preprocess_for_xgboost(df, preprocessor):
     categorical_columns = preprocessor['categorical_columns']
     numeric_columns = preprocessor['numeric_columns']
     encoder = preprocessor['encoder']
-    expected_feature_order = preprocessor.get('feature_names', ['id', 'dur', 'proto', 'state', 'spkts', 'dpkts', 'sbytes', 'dbytes', 'rate', 'sttl', 'dttl', 'sload', 'dload', 'sloss', 'dloss', 'sinpkt', 'dinpkt', 'sjit', 'djit', 'swin', 'stcpb', 'dtcpb', 'dwin', 'tcprtt', 'synack', 'ackdat', 'smean', 'dmean', 'trans_depth', 'response_body_len', 'ct_srv_src', 'ct_state_ttl', 'ct_dst_ltm', 'ct_src_dport_ltm', 'ct_dst_sport_ltm', 'ct_dst_src_ltm', 'is_ftp_login', 'ct_ftp_cmd', 'ct_flw_http_mthd', 'ct_src_ltm', 'ct_srv_dst', 'is_sm_ips_ports', 'total_bytes', 'byte_ratio', 'ttl_diff'])
+    expected_feature_order = preprocessor.get('feature_names', categorical_columns + numeric_columns)
 
     # Create a new DataFrame with the expected columns
     processed_df = pd.DataFrame(index=df.index, columns=expected_feature_order)
@@ -69,7 +69,8 @@ def preprocess_for_xgboost(df, preprocessor):
         processed_df[col] = pd.to_numeric(processed_df[col], errors='coerce')
         processed_df[col] = processed_df[col].fillna(processed_df[col].median() if pd.notnull(processed_df[col].median()) else -1)
 
-    return processed_df
+    return processed_df.values  # Return numpy array instead of DataFrame
+
 def load_preprocessor(model_type):
     model_dir = os.path.join(os.getcwd(), 'system_main', 'model', 'saved_model')
     preprocessor_path = os.path.join(model_dir, f'{model_type}_preprocessor.joblib')
