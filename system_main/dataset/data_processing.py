@@ -1,48 +1,76 @@
-import os
 import pandas as pd
-from sklearn.preprocessing import LabelEncoder
-from sklearn.feature_selection import SelectKBest, f_classif
+import numpy as np
+import joblib
+import os
 
-def load_and_preprocess_data(train_file, test_file):
-    # Identify the correct project root
-    current_dir = os.getcwd()
-    if 'system_main' in current_dir:
-        project_root = os.path.dirname(current_dir)
+def engineer_features(df):
+    if 'sbytes' in df.columns and 'dbytes' in df.columns:
+        df['total_bytes'] = df['sbytes'] + df['dbytes']
+        df['byte_ratio'] = df['sbytes'] / (df['dbytes'] + 1)
+
+    if 'sttl' in df.columns and 'dttl' in df.columns:
+        df['ttl_diff'] = df['sttl'] - df['dttl']
+
+    if 'sport' in df.columns and 'dport' in df.columns:
+        df['high_port'] = ((df['sport'] > 1024) | (df['dport'] > 1024)).astype(int)
+
+    return df
+
+def preprocess_for_inference(df, preprocessor, model_type):
+    df = engineer_features(df)
+
+    if model_type == 'rf':
+        return preprocess_for_random_forest(df, preprocessor)
+    elif model_type == 'xgboost':
+        return preprocess_for_xgboost(df, preprocessor)
     else:
-        project_root = current_dir
+        raise ValueError(f"Unsupported model type: {model_type}")
 
-    train_data_path = os.path.join(project_root, 'system_main', 'dataset', train_file)
-    test_data_path = os.path.join(project_root, 'system_main', 'dataset', test_file)
+def preprocess_for_random_forest(df, preprocessor):
+    for col, encoder in preprocessor['label_encoders'].items():
+        if col in df.columns:
+            df[col] = df[col].astype(str).map(lambda x: encoder.transform([x])[0] if x in encoder.classes_ else -1)
 
-    # Load the data
-    train_data_initial = pd.read_csv(train_data_path)
-    test_data_initial = pd.read_csv(test_data_path)
+    selected_features = preprocessor['selected_features']
+    for feature in selected_features:
+        if feature not in df.columns:
+            df[feature] = 0
 
-    # Drop the 'service' column
-    train_data = train_data_initial.drop(columns=['service'])
-    test_data = test_data_initial.drop(columns=['service'])
+    return df[selected_features]
 
-    # Define the target column and categorical columns
-    target_column = 'label'
-    categorical_columns = ['proto', 'state', 'attack_cat']
+def preprocess_for_xgboost(df, preprocessor):
+    categorical_columns = preprocessor['categorical_columns']
+    numeric_columns = preprocessor['numeric_columns']
+    encoder = preprocessor['encoder']
+    expected_feature_order = preprocessor.get('feature_names', ['id', 'dur', 'proto', 'state', 'spkts', 'dpkts', 'sbytes', 'dbytes', 'rate', 'sttl', 'dttl', 'sload', 'dload', 'sloss', 'dloss', 'sinpkt', 'dinpkt', 'sjit', 'djit', 'swin', 'stcpb', 'dtcpb', 'dwin', 'tcprtt', 'synack', 'ackdat', 'smean', 'dmean', 'trans_depth', 'response_body_len', 'ct_srv_src', 'ct_state_ttl', 'ct_dst_ltm', 'ct_src_dport_ltm', 'ct_dst_sport_ltm', 'ct_dst_src_ltm', 'is_ftp_login', 'ct_ftp_cmd', 'ct_flw_http_mthd', 'ct_src_ltm', 'ct_srv_dst', 'is_sm_ips_ports', 'total_bytes', 'byte_ratio', 'ttl_diff'])
 
-    # Separate features and target
-    X_train = train_data.drop(columns=[target_column])
-    y_train = train_data[target_column]
-    X_test = test_data.drop(columns=[target_column])
-    y_test = test_data[target_column]
+    # Create a new DataFrame with the expected columns
+    processed_df = pd.DataFrame(index=df.index, columns=expected_feature_order)
 
-    # Encode categorical columns
-    label_encoders = {}
-    for col in categorical_columns:
-        label_encoders[col] = LabelEncoder()
-        X_train[col] = label_encoders[col].fit_transform(X_train[col].astype(str))
-        X_test[col] = X_test[col].apply(lambda x: label_encoders[col].transform([x])[0] if x in label_encoders[col].classes_ else -1)
+    # Handle all columns
+    for col in expected_feature_order:
+        if col in df.columns:
+            if col in categorical_columns:
+                known_categories = encoder.categories_[encoder.feature_names_in_.tolist().index(col)]
+                category_map = {cat: i for i, cat in enumerate(known_categories)}
+                processed_df[col] = df[col].map(lambda x: category_map.get(x, len(category_map)))
+            else:
+                processed_df[col] = pd.to_numeric(df[col], errors='coerce')
+        else:
+            processed_df[col] = 0  # or another appropriate default value
 
-    # Feature selection
-    selector = SelectKBest(score_func=f_classif, k=20)
-    X_train_selected = selector.fit_transform(X_train, y_train)
-    selected_feature_names = X_train.columns[selector.get_support()]
-    X_test_selected = X_test[selected_feature_names]
+    # Fill NaN values
+    for col in processed_df.columns:
+        median_value = processed_df[col].median()
+        processed_df[col] = processed_df[col].fillna(median_value if pd.notnull(median_value) else -1)
 
-    return X_train_selected, X_test_selected, y_train, y_test, label_encoders, selected_feature_names
+    # Ensure all columns are numeric
+    for col in processed_df.columns:
+        processed_df[col] = pd.to_numeric(processed_df[col], errors='coerce')
+        processed_df[col] = processed_df[col].fillna(processed_df[col].median() if pd.notnull(processed_df[col].median()) else -1)
+
+    return processed_df
+def load_preprocessor(model_type):
+    model_dir = os.path.join(os.getcwd(), 'system_main', 'model', 'saved_model')
+    preprocessor_path = os.path.join(model_dir, f'{model_type}_preprocessor.joblib')
+    return joblib.load(preprocessor_path)
