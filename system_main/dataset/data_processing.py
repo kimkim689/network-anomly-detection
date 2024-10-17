@@ -57,7 +57,7 @@ def preprocess_for_xgboost(df, preprocessor):
             else:
                 processed_df[col] = pd.to_numeric(df[col], errors='coerce')
         else:
-            processed_df[col] = 0  # or another appropriate default value
+            processed_df[col] = 0  
 
     # Fill NaN values
     for col in processed_df.columns:
